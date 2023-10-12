@@ -317,7 +317,7 @@ We'll also need to update the `items` asset to use this client as a resource:
     required_resource_keys={"hn_client"},
     io_manager_key="snowflake_io_manager",
 )
-def items(context) -> pd.DataFrame:
+def items(context: AssetExecutionContext) -> pd.DataFrame:
     """Items from the Hacker News API: each is a story or a comment on a story."""
     hn_client = context.resources.hn_client
 
@@ -400,7 +400,7 @@ Now we can use the stub Hacker News resource to test that the `items` asset tran
 
 
 def test_items():
-    context = build_op_context(
+    context = build_asset_context(
         resources={"hn_client": StubHNClient()},
         op_config={"N": StubHNClient().fetch_max_item_id()},
     )

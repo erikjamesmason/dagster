@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dagster import asset
+from dagster import AssetExecutionContext, asset
 
 # start_items
 # assets.py
@@ -11,7 +11,7 @@ from dagster import asset
     required_resource_keys={"hn_client"},
     io_manager_key="snowflake_io_manager",
 )
-def items(context) -> pd.DataFrame:
+def items(context: AssetExecutionContext) -> pd.DataFrame:
     """Items from the Hacker News API: each is a story or a comment on a story."""
     hn_client = context.resources.hn_client
 
