@@ -1301,9 +1301,131 @@ class OpExecutionContext(AbstractComputeExecutionContext, metaclass=OpExecutionC
         self._step_execution_context.set_requires_typed_event_stream(error_message=error_message)
 
 
+###############################
+######## AssetExecutionContext
+###############################
+
+OP_EXECUTION_CONTEXT_ONLY_METHODS = set(
+    [
+        "describe_op",
+        "file_manager",
+        "has_assets_def",
+        "get_mapping_key",
+        "get_step_execution_context",
+        "job_def",
+        "node_handle",
+        "op",
+        "op_config",
+        "op_def",
+        "op_handle",
+        "step_launcher",
+        "has_events",
+        "consume_events",
+        "log_event",
+        "get_asset_provenance",
+    ]
+)
+
+
+def _get_deprecation_kwargs(attr: str):
+    deprecation_kwargs = {"breaking_version": "1.8.0"}
+    deprecation_kwargs["subject"] = f"AssetExecutionContext.{attr}"
+
+    if attr in OP_EXECUTION_CONTEXT_ONLY_METHODS:
+        deprecation_kwargs["additional_warn_text"] = (
+            f"You have called the deprecated method {attr} on AssetExecutionContext. Use"
+            " the underlying OpExecutionContext instead by calling"
+            f" context.op_execution_context.{attr}."
+        )
+
+    return deprecation_kwargs
+
+
 class AssetExecutionContext(OpExecutionContext):
-    def __init__(self, step_execution_context: StepExecutionContext):
-        super().__init__(step_execution_context=step_execution_context)
+    def __init__(self, op_execution_context: OpExecutionContext) -> None:
+        self._op_execution_context = check.inst_param(
+            op_execution_context, "op_execution_context", OpExecutionContext
+        )
+        super().__init__(step_execution_context=op_execution_context._step_execution_context)  # noqa: SLF001
+
+    @property
+    def op_execution_context(self) -> OpExecutionContext:
+        return self._op_execution_context
+
+    ######## Deprecated methods
+    @deprecated(**_get_deprecation_kwargs("has_assets_def"))
+    @property
+    def has_assets_def(self) -> bool:
+        return self.op_execution_context.has_assets_def
+
+    @deprecated(**_get_deprecation_kwargs("op_def"))
+    @property
+    def op_def(self) -> OpDefinition:
+        return self.op_execution_context.op_def
+
+    @deprecated(**_get_deprecation_kwargs("op_config"))
+    @property
+    def op_config(self) -> Any:
+        return self.op_execution_context.op_config
+
+    @deprecated(**_get_deprecation_kwargs("file_manager"))
+    @property
+    def file_manager(self):
+        return self.op_execution_context.file_manager
+
+    @deprecated(**_get_deprecation_kwargs("get_mapping_key"))
+    def get_mapping_key(self) -> Optional[str]:
+        return self.op_execution_context.get_mapping_key()
+
+    @deprecated(**_get_deprecation_kwargs("node_handle"))
+    @property
+    def node_handle(self) -> NodeHandle:
+        return self.op_execution_context.node_handle
+
+    @deprecated(**_get_deprecation_kwargs("op"))
+    @property
+    def op(self) -> Node:
+        return self.op_execution_context.op
+
+    @deprecated(**_get_deprecation_kwargs("job_def"))
+    @property
+    def job_def(self) -> JobDefinition:
+        return self.op_execution_context.job_def
+
+    @deprecated(**_get_deprecation_kwargs("describe_op"))
+    def describe_op(self):
+        return self.op_execution_context.describe_op()
+
+    @deprecated(**_get_deprecation_kwargs("op_handle"))
+    @property
+    def op_handle(self) -> NodeHandle:
+        return self.op_execution_context.op_handle
+
+    @deprecated(**_get_deprecation_kwargs("step_launcher"))
+    @property
+    def step_launcher(self) -> Optional[StepLauncher]:
+        return self.op_execution_context.step_launcher
+
+    @deprecated(**_get_deprecation_kwargs("consume_events"))
+    def consume_events(self) -> Iterator[DagsterEvent]:
+        return self.op_execution_context.consume_events()
+
+    @deprecated(**_get_deprecation_kwargs("get_step_execution_context"))
+    def get_step_execution_context(self) -> StepExecutionContext:
+        return self.op_execution_context.get_step_execution_context()
+
+    @deprecated(**_get_deprecation_kwargs("has_events"))
+    def has_events(self) -> bool:
+        return self.op_execution_context.has_events()
+
+    @deprecated(**_get_deprecation_kwargs("log_event"))
+    def log_event(self, event: UserEvent) -> None:
+        return self._op_execution_context.log_event(event)
+
+    @deprecated(**_get_deprecation_kwargs("get_asset_provenance"))
+    @experimental
+    def get_asset_provenance(self, asset_key: AssetKey) -> Optional[DataProvenance]:
+        return self._op_execution_context.get_asset_provenance(asset_key)
 
 
 def build_execution_context(
@@ -1359,16 +1481,18 @@ def build_execution_context(
             " OpExecutionContext, or left blank."
         )
 
+    op_context = OpExecutionContext(step_context)
+
     if context_annotation is EmptyAnnotation:
         # if no type hint has been given, default to:
         # * AssetExecutionContext for sda steps not in graph-backed assets, and asset_checks
         # * OpExecutionContext for non sda steps
         # * OpExecutionContext for ops in graph-backed assets
         if is_asset_check:
-            return AssetExecutionContext(step_context)
+            return AssetExecutionContext(op_context)
         if is_op_in_graph_asset or not is_sda_step:
-            return OpExecutionContext(step_context)
-        return AssetExecutionContext(step_context)
+            return op_context
+        return AssetExecutionContext(op_context)
     if context_annotation is AssetExecutionContext:
-        return AssetExecutionContext(step_context)
-    return OpExecutionContext(step_context)
+        return AssetExecutionContext(op_context)
+    return op_context
