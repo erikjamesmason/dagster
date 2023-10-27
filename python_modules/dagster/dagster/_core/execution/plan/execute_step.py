@@ -705,6 +705,8 @@ def _store_output(
     manager_materializations = []
     manager_metadata: Dict[str, MetadataValue] = {}
 
+    io_manager_key = output_def.io_manager_key
+
     # don't store asset check outputs or asset observation outputs
     step_output = step_context.step.step_output_named(step_output_handle.output_name)
     asset_key = step_output.properties.asset_key
@@ -717,6 +719,7 @@ def _store_output(
             and output.value is None
         )
     ):
+        io_manager_key = None
 
         def _no_op() -> Iterator[DagsterEvent]:
             yield from ()
@@ -830,9 +833,10 @@ def _store_output(
             else ()
         )
 
-    yield DagsterEvent.handled_output(
-        step_context,
-        output_name=step_output_handle.output_name,
-        manager_key=output_def.io_manager_key,
-        metadata=manager_metadata,
-    )
+    if io_manager_key is not None:
+        yield DagsterEvent.handled_output(
+            step_context,
+            output_name=step_output_handle.output_name,
+            manager_key=io_manager_key,
+            metadata=manager_metadata,
+        )
