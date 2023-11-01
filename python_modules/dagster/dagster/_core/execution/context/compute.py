@@ -621,6 +621,13 @@ class OpExecutionContext(AbstractComputeExecutionContext, metaclass=OpExecutionC
 
         return asset_checks_def
 
+    @property
+    def is_subsetted(self):
+        """Whether the current asset is subsetted."""
+        if not self.has_assets_def:
+            return False
+        return self.assets_def.is_subsetted
+
     @public
     @property
     def selected_asset_check_keys(self) -> AbstractSet[AssetCheckKey]:
