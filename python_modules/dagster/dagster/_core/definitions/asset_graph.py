@@ -114,6 +114,9 @@ class AssetGraph:
     def group_names_by_key(self) -> Mapping[AssetKey, Optional[str]]:
         return self._group_names_by_key
 
+    def get_group_name(self, asset_key: AssetKey):
+        return self._group_names_by_key[asset_key]
+
     @property
     def source_asset_keys(self) -> AbstractSet[AssetKey]:
         return self._source_asset_keys

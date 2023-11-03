@@ -1,6 +1,10 @@
 import logging
 import sys
+import threading
+import time
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from types import TracebackType
 from typing import Dict, Optional, Sequence, Tuple, Type
 
@@ -35,10 +39,10 @@ from dagster._core.storage.tags import (
     AUTO_MATERIALIZE_TAG,
     AUTO_OBSERVE_TAG,
 )
-from dagster._core.utils import make_new_run_id
+from dagster._core.utils import InheritContextThreadPoolExecutor, make_new_run_id
 from dagster._core.workspace.context import IWorkspaceProcessContext
 from dagster._core.workspace.workspace import IWorkspace
-from dagster._daemon.daemon import DaemonIterator, IntervalDaemon
+from dagster._daemon.daemon import DaemonIterator, DagsterDaemon
 from dagster._utils import (
     SingleInstigatorDebugCrashFlags,
     check_for_debug_crash,
@@ -46,7 +50,7 @@ from dagster._utils import (
 )
 from dagster._utils.error import serializable_error_info_from_exc_info
 
-CURSOR_KEY = "ASSET_DAEMON_CURSOR"
+_CURSOR_KEY = "ASSET_DAEMON_CURSOR"
 ASSET_DAEMON_PAUSED_KEY = "ASSET_DAEMON_PAUSED"
 
 EVALUATIONS_TTL_DAYS = 30
@@ -56,9 +60,32 @@ EVALUATIONS_TTL_DAYS = 30
 # there's an old in-progress tick left to finish that may no longer be correct to finish)
 MAX_TIME_TO_RESUME_TICK_SECONDS = 60 * 60 * 24
 
-FIXED_AUTO_MATERIALIZATION_ORIGIN_ID = "asset_daemon_origin"
-FIXED_AUTO_MATERIALIZATION_SELECTOR_ID = "asset_daemon_selector"
-FIXED_AUTO_MATERIALIZATION_INSTIGATOR_NAME = "asset_daemon"
+_FIXED_AUTO_MATERIALIZATION_ORIGIN_ID = "asset_daemon_origin"
+_FIXED_AUTO_MATERIALIZATION_SELECTOR_ID = "asset_daemon_selector"
+_FIXED_AUTO_MATERIALIZATION_INSTIGATOR_NAME = "asset_daemon"
+
+MIN_INTERVAL_LOOP_TIME = 5
+
+
+def get_amp_origin_id(group_name: Optional[str]) -> str:
+    if not group_name:
+        return _FIXED_AUTO_MATERIALIZATION_ORIGIN_ID
+    else:
+        return f"{_FIXED_AUTO_MATERIALIZATION_ORIGIN_ID}_{group_name}"
+
+
+def get_amp_selector_id(group_name: Optional[str]) -> str:
+    if not group_name:
+        return _FIXED_AUTO_MATERIALIZATION_SELECTOR_ID
+    else:
+        return f"{_FIXED_AUTO_MATERIALIZATION_SELECTOR_ID}_{group_name}"
+
+
+def get_amp_instigator_name(group_name: Optional[str]) -> str:
+    if not group_name:
+        return _FIXED_AUTO_MATERIALIZATION_INSTIGATOR_NAME
+    else:
+        return f"{_FIXED_AUTO_MATERIALIZATION_INSTIGATOR_NAME}_{group_name}"
 
 
 def get_auto_materialize_paused(instance: DagsterInstance) -> bool:
@@ -76,12 +103,20 @@ def set_auto_materialize_paused(instance: DagsterInstance, paused: bool):
     )
 
 
-def _get_raw_cursor(instance: DagsterInstance) -> Optional[str]:
-    return instance.daemon_cursor_storage.get_cursor_values({CURSOR_KEY}).get(CURSOR_KEY)
+def get_cursor_key(group_name: Optional[str]):
+    return _CURSOR_KEY if not group_name else f"{_CURSOR_KEY}:{group_name}"
 
 
-def get_current_evaluation_id(instance: DagsterInstance) -> Optional[int]:
-    raw_cursor = _get_raw_cursor(instance)
+def _get_raw_cursor(instance: DagsterInstance, group_name: Optional[str]) -> Optional[str]:
+    key = get_cursor_key(group_name)
+
+    return instance.daemon_cursor_storage.get_cursor_values({key}).get(key)
+
+
+def get_current_evaluation_id(
+    instance: DagsterInstance, group_name: Optional[str]
+) -> Optional[int]:
+    raw_cursor = _get_raw_cursor(instance, group_name)
     return AssetDaemonCursor.get_evaluation_id_from_serialized(raw_cursor) if raw_cursor else None
 
 
@@ -89,6 +124,7 @@ class AutoMaterializeLaunchContext:
     def __init__(
         self,
         tick: InstigatorTick,
+        group_name: Optional[str],
         instance: DagsterInstance,
         logger: logging.Logger,
         tick_retention_settings,
@@ -96,6 +132,7 @@ class AutoMaterializeLaunchContext:
         self._tick = tick
         self._logger = logger
         self._instance = instance
+        self._group_name = group_name
 
         self._purge_settings = defaultdict(set)
         for status, day_offset in tick_retention_settings.items():
@@ -177,8 +214,8 @@ class AutoMaterializeLaunchContext:
             if day_offset <= 0:
                 continue
             self._instance.purge_ticks(
-                FIXED_AUTO_MATERIALIZATION_ORIGIN_ID,
-                FIXED_AUTO_MATERIALIZATION_SELECTOR_ID,
+                get_amp_origin_id(self._group_name),
+                get_amp_selector_id(self._group_name),
                 before=pendulum.now("UTC").subtract(days=day_offset).timestamp(),
                 tick_statuses=list(statuses),
             )
@@ -187,33 +224,33 @@ class AutoMaterializeLaunchContext:
         self._instance.update_tick(self._tick)
 
 
-class AssetDaemon(IntervalDaemon):
+class AssetDaemon(DagsterDaemon):
     def __init__(self, interval_seconds: int):
-        super().__init__(interval_seconds=interval_seconds)
+        self._interval_seconds = interval_seconds
+        super().__init__()
 
     @classmethod
     def daemon_type(cls) -> str:
         return "ASSET"
 
-    def run_iteration(
+    def core_loop(
         self,
         workspace_process_context: IWorkspaceProcessContext,
+        shutdown_event: threading.Event,
     ) -> DaemonIterator:
-        yield from self._run_iteration_impl(
+        yield from self.execute_amp_iteration_loop(
             workspace_process_context,
+            shutdown_event=shutdown_event,
             debug_crash_flags={},
         )
 
-    def _run_iteration_impl(
+    def execute_amp_iteration_loop(
         self,
         workspace_process_context: IWorkspaceProcessContext,
+        shutdown_event: threading.Event,
         debug_crash_flags: SingleInstigatorDebugCrashFlags,
     ) -> DaemonIterator:
-        instance = workspace_process_context.instance
-
-        if get_auto_materialize_paused(instance):
-            yield
-            return
+        instance: DagsterInstance = workspace_process_context.instance
 
         schedule_storage = check.not_none(
             instance.schedule_storage,
@@ -226,38 +263,168 @@ class AssetDaemon(IntervalDaemon):
                 " migrate` to enable."
             )
 
+        amp_tick_futures: Dict[Optional[str], Future] = {}
+        last_submit_times = {}
+        threadpool_executor = None
+        with ExitStack() as stack:
+            settings = instance.get_settings("auto_materialize")
+            if settings.get("use_threads"):
+                threadpool_executor = stack.enter_context(
+                    InheritContextThreadPoolExecutor(
+                        max_workers=settings.get("num_workers"),
+                        thread_name_prefix="asset_daemon_worker",
+                    )
+                )
+
+            while True:
+                start_time = pendulum.now("UTC").timestamp()
+                yield from self._run_iteration_impl(
+                    workspace_process_context,
+                    threadpool_executor=threadpool_executor,
+                    amp_tick_futures=amp_tick_futures,
+                    last_submit_times=last_submit_times,
+                    debug_crash_flags={},
+                )
+                yield None
+                end_time = pendulum.now("UTC").timestamp()
+                loop_duration = end_time - start_time
+                sleep_time = max(0, MIN_INTERVAL_LOOP_TIME - loop_duration)
+                shutdown_event.wait(sleep_time)
+                yield None
+
+    def _run_iteration_impl(
+        self,
+        workspace_process_context: IWorkspaceProcessContext,
+        threadpool_executor: Optional[ThreadPoolExecutor],
+        amp_tick_futures: Dict[Optional[str], Future],
+        last_submit_times: Dict[Optional[str], float],
+        debug_crash_flags: SingleInstigatorDebugCrashFlags,  # TODO No longer single instigator
+    ):
+        workspace = workspace_process_context.create_request_context()
+        asset_graph = ExternalAssetGraph.from_workspace(workspace)
+
+        instance: DagsterInstance = workspace_process_context.instance
+        settings = instance.get_settings("auto_materialize")
+        if settings.get("use_evaluation_groups"):
+            # TODO This will come from the policies, not the asset groups
+            group_names = set(asset_graph.group_names_by_key.values())
+        else:
+            group_names = {None}  # None = all assets
+
+        now = time.time()
+
+        if get_auto_materialize_paused(instance):
+            yield
+            return
+
+        for group_name in group_names:
+            # TODO more granular on/off
+
+            # only one tick per evaluation group can be in flight
+            if threadpool_executor:
+                if group_name in amp_tick_futures and not amp_tick_futures[group_name].done():
+                    continue
+
+                if (
+                    group_name in last_submit_times
+                    and now < last_submit_times[group_name] + self._interval_seconds
+                ):
+                    continue
+
+                last_submit_times[group_name] = now
+
+                future = threadpool_executor.submit(
+                    self._process_auto_materialize_tick,
+                    workspace_process_context,
+                    group_name,
+                    debug_crash_flags,
+                )
+                amp_tick_futures[group_name] = future
+                yield
+            else:
+                if (
+                    group_name in last_submit_times
+                    and now < last_submit_times[group_name] + self._interval_seconds
+                ):
+                    continue
+
+                last_submit_times[group_name] = now
+
+                yield from self._process_auto_materialize_tick_generator(
+                    workspace_process_context, group_name, debug_crash_flags
+                )
+
+    def _get_display_group_name(self, group_name: Optional[str]) -> str:
+        return f"evaluation group {group_name}" or "default evaluation group"
+
+    def _process_auto_materialize_tick(
+        self,
+        workspace_process_context: IWorkspaceProcessContext,
+        group_name: Optional[str],
+        debug_crash_flags: SingleInstigatorDebugCrashFlags,  # TODO No longer single instigator
+    ):
+        return list(
+            self._process_auto_materialize_tick_generator(
+                workspace_process_context, group_name, debug_crash_flags
+            )
+        )
+
+    def _process_auto_materialize_tick_generator(
+        self,
+        workspace_process_context: IWorkspaceProcessContext,
+        group_name: Optional[str],
+        debug_crash_flags: SingleInstigatorDebugCrashFlags,  # TODO No longer single instigator
+    ):
         evaluation_time = pendulum.now("UTC")
 
         workspace = workspace_process_context.create_request_context()
         asset_graph = ExternalAssetGraph.from_workspace(workspace)
+
+        instance: DagsterInstance = workspace_process_context.instance
+        schedule_storage = check.not_none(instance.schedule_storage)
+
+        print_group_name = self._get_display_group_name(group_name)
+
         target_asset_keys = {
             target_key
             for target_key in asset_graph.materializable_asset_keys
             if asset_graph.get_auto_materialize_policy(target_key) is not None
+            # TODO Replace with evaluation group fetch once that is a thing
+            and (not group_name or asset_graph.get_group_name(target_key) == group_name)
         }
+
         num_target_assets = len(target_asset_keys)
 
-        auto_observe_assets = [
-            key
-            for key in asset_graph.source_asset_keys
-            if asset_graph.get_auto_observe_interval_minutes(key) is not None
-        ]
+        # TODO Where do these auto-observe assets fit? For now leave them out when things are split out by asset groups
+
+        if not group_name:
+            auto_observe_assets = [
+                key
+                for key in asset_graph.source_asset_keys
+                if asset_graph.get_auto_observe_interval_minutes(key) is not None
+            ]
+        else:
+            auto_observe_assets = []
 
         num_auto_observe_assets = len(auto_observe_assets)
         has_auto_observe_assets = any(auto_observe_assets)
 
         if not target_asset_keys and not has_auto_observe_assets:
-            self._logger.debug("No assets that require auto-materialize checks")
+            self._logger.debug(
+                "No assets that require auto-materialize checks for {print_group_name}"
+            )
             yield
             return
 
         self._logger.info(
             f"Checking {num_target_assets} asset{'' if num_target_assets == 1 else 's'} and"
             f" {num_auto_observe_assets} observable source"
-            f" asset{'' if num_auto_observe_assets == 1 else 's'} for auto-materialization"
+            f" asset{'' if num_auto_observe_assets == 1 else 's'} for {print_group_name}"
         )
 
-        raw_cursor = _get_raw_cursor(instance)
+        # TODO Adapt stored legacy cursor into a cursor for a particular gruop
+
+        raw_cursor = _get_raw_cursor(instance, group_name)
         stored_cursor = (
             AssetDaemonCursor.from_serialized(raw_cursor, asset_graph)
             if raw_cursor
@@ -269,7 +436,7 @@ class AssetDaemon(IntervalDaemon):
         )
 
         ticks = instance.get_ticks(
-            FIXED_AUTO_MATERIALIZATION_ORIGIN_ID, FIXED_AUTO_MATERIALIZATION_SELECTOR_ID, limit=1
+            get_amp_origin_id(group_name), get_amp_selector_id(group_name), limit=1
         )
         latest_tick = ticks[0] if ticks else None
 
@@ -291,7 +458,7 @@ class AssetDaemon(IntervalDaemon):
             ):
                 if latest_tick.status == TickStatus.STARTED:
                     self._logger.warn(
-                        f"Tick for evaluation {stored_cursor.evaluation_id} was interrupted part-way through, resuming"
+                        f"Tick for evaluation {stored_cursor.evaluation_id} for {print_group_name} was interrupted part-way through, resuming"
                     )
                     retry_tick = latest_tick
                 elif (
@@ -299,7 +466,7 @@ class AssetDaemon(IntervalDaemon):
                     and latest_tick.tick_data.failure_count <= max_retries
                 ):
                     self._logger.info(
-                        f"Retrying failed tick for evaluation {stored_cursor.evaluation_id}"
+                        f"Retrying failed tick for evaluation {stored_cursor.evaluation_id} for {print_group_name}"
                     )
                     retry_tick = instance.create_tick(
                         latest_tick.tick_data.with_status(
@@ -317,7 +484,7 @@ class AssetDaemon(IntervalDaemon):
                     # Old tick that won't be resumed - move it into a SKIPPED state so it isn't
                     # left dangling in STARTED
                     self._logger.warn(
-                        f"Moving dangling STARTED tick from evaluation {latest_tick.tick_data.auto_materialize_evaluation_id} into SKIPPED"
+                        f"Moving dangling STARTED tick from evaluation {latest_tick.tick_data.auto_materialize_evaluation_id} for {print_group_name} into SKIPPED"
                     )
                     latest_tick = latest_tick.with_status(status=TickStatus.SKIPPED)
                     instance.update_tick(latest_tick)
@@ -327,12 +494,12 @@ class AssetDaemon(IntervalDaemon):
         else:
             tick = instance.create_tick(
                 TickData(
-                    instigator_origin_id=FIXED_AUTO_MATERIALIZATION_ORIGIN_ID,
-                    instigator_name=FIXED_AUTO_MATERIALIZATION_INSTIGATOR_NAME,
+                    instigator_origin_id=get_amp_origin_id(group_name),
+                    instigator_name=get_amp_instigator_name(group_name),
                     instigator_type=InstigatorType.AUTO_MATERIALIZE,
                     status=TickStatus.STARTED,
                     timestamp=evaluation_time.timestamp(),
-                    selector_id=FIXED_AUTO_MATERIALIZATION_SELECTOR_ID,
+                    selector_id=get_amp_selector_id(group_name),
                     auto_materialize_evaluation_id=stored_cursor.evaluation_id + 1,
                 )
             )
@@ -341,6 +508,7 @@ class AssetDaemon(IntervalDaemon):
 
         with AutoMaterializeLaunchContext(
             tick,
+            group_name,
             instance,
             self._logger,
             tick_retention_settings,
@@ -406,7 +574,7 @@ class AssetDaemon(IntervalDaemon):
                 # Write out the persistent cursor, which ensures that future ticks will move on once
                 # they determine that nothing needs to be retried
                 instance.daemon_cursor_storage.set_cursor_values(
-                    {CURSOR_KEY: new_cursor.serialize()}
+                    {get_cursor_key(group_name): new_cursor.serialize()}
                 )
 
                 check_for_debug_crash(debug_crash_flags, "CURSOR_UPDATED")
@@ -416,7 +584,7 @@ class AssetDaemon(IntervalDaemon):
                 f" {len(run_requests)} run{'s' if len(run_requests) != 1 else ''} and"
                 f" {len(evaluations_by_asset_key)} asset"
                 f" evaluation{'s' if len(evaluations_by_asset_key) != 1 else ''} for evaluation ID"
-                f" {evaluation_id}"
+                f" {evaluation_id} for {print_group_name}"
             )
 
             pipeline_and_execution_plan_cache: Dict[

@@ -1104,15 +1104,17 @@ class GrapheneQuery(graphene.ObjectType):
         afterTimestamp=None,
     ):
         from dagster._daemon.asset_daemon import (
-            FIXED_AUTO_MATERIALIZATION_ORIGIN_ID,
-            FIXED_AUTO_MATERIALIZATION_SELECTOR_ID,
+            get_amp_origin_id,
+            get_amp_selector_id,
         )
+
+        # TODO Split out by evaluation group
 
         return get_instigation_ticks(
             graphene_info=graphene_info,
             instigator_type=InstigatorType.AUTO_MATERIALIZE,
-            instigator_origin_id=FIXED_AUTO_MATERIALIZATION_ORIGIN_ID,
-            selector_id=FIXED_AUTO_MATERIALIZATION_SELECTOR_ID,
+            instigator_origin_id=get_amp_origin_id(None),
+            selector_id=get_amp_selector_id(None),
             batch_loader=None,
             dayRange=dayRange,
             dayOffset=dayOffset,

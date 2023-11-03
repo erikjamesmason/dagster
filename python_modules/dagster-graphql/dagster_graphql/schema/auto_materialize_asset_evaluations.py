@@ -227,7 +227,7 @@ class GrapheneAutoMaterializeAssetEvaluationRecords(graphene.ObjectType):
 
         # TODO Move to its own top-level field rather than a field
         # on GrapheneAutoMaterializeAssetEvaluationRecords
-        return get_current_evaluation_id(graphene_info.context.instance)
+        return get_current_evaluation_id(graphene_info.context.instance, group_name=None)
 
 
 class GrapheneAutoMaterializeAssetEvaluationNeedsMigrationError(graphene.ObjectType):
