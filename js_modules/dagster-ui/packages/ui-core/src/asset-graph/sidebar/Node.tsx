@@ -144,6 +144,7 @@ export const Node = ({
             <GrayOnHoverBox
               $showFocusOutline={true}
               style={{...(isSelected ? {background: Colors.Blue50} : {})}}
+              autoFocus={isSelected}
             >
               <div
                 style={{
