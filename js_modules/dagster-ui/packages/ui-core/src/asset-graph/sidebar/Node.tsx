@@ -403,5 +403,5 @@ function isElementInsideSVGViewport(element: Element | null) {
   }
 
   // Start the recursive check
-  return isElementInsideSVG(element.parentElement);
+  return isElementInsideSVGViewport(element.parentElement);
 }
