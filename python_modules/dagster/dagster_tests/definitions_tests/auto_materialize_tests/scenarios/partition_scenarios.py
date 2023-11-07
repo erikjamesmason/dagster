@@ -131,12 +131,12 @@ partition_scenarios = {
         active_backfill_targets=[
             {
                 AssetKey("daily"): TimeWindowPartitionsSubset(
-                    daily_partitions_def
+                    daily_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(["2013-01-06"])
             },
             {
                 AssetKey("hourly"): TimeWindowPartitionsSubset(
-                    hourly_partitions_def
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(
                     [
                         "2013-01-06-01:00",
@@ -160,7 +160,7 @@ partition_scenarios = {
         active_backfill_targets=[
             {
                 AssetKey("hourly"): TimeWindowPartitionsSubset(
-                    hourly_partitions_def
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(
                     [
                         "2013-01-05-00:00",
@@ -172,7 +172,9 @@ partition_scenarios = {
             {
                 AssetKey(
                     "non_existant_asset"  # ignored since can't be loaded
-                ): TimeWindowPartitionsSubset(hourly_partitions_def).with_partition_keys(
+                ): TimeWindowPartitionsSubset(
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
+                ).with_partition_keys(
                     [
                         "2013-01-05-00:00",
                     ],
@@ -193,7 +195,7 @@ partition_scenarios = {
         active_backfill_targets=[
             {
                 AssetKey("hourly"): TimeWindowPartitionsSubset(
-                    hourly_partitions_def
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(
                     hourly_partitions_def.get_partition_keys_in_range(
                         PartitionKeyRange(start="2013-01-05-00:00", end="2013-01-07-03:00")
@@ -229,7 +231,7 @@ partition_scenarios = {
         active_backfill_targets=[
             {
                 AssetKey("hourly"): TimeWindowPartitionsSubset(
-                    hourly_partitions_def
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(["2013-01-05-04:00"])
             }
         ],
@@ -287,7 +289,7 @@ partition_scenarios = {
         active_backfill_targets=[
             {
                 AssetKey("hourly"): TimeWindowPartitionsSubset(
-                    hourly_partitions_def,
+                    hourly_partitions_def, num_partitions=None, included_time_windows=[]
                 ).with_partition_keys(["2013-01-05-04:00"])
             }
         ],
