@@ -31,7 +31,12 @@ from dagster._core.instance import DynamicPartitionsStore
 from dagster._serdes import (
     whitelist_for_serdes,
 )
-from dagster._serdes.serdes import FieldSerializer, deserialize_value, serialize_value
+from dagster._serdes.serdes import (
+    FieldSerializer,
+    NamedTupleSerializer,
+    deserialize_value,
+    serialize_value,
+)
 from dagster._utils import utc_datetime_from_timestamp
 from dagster._utils.partitions import DEFAULT_HOURLY_FORMAT_WITHOUT_TIMEZONE
 from dagster._utils.schedules import (
@@ -1871,10 +1876,26 @@ class TimeWindowPartitionsDefinitionSerializer(FieldSerializer):
         ).to_time_window_partitions_def()
 
 
+class TimeWindowPartitionsSubsetSerializer(NamedTupleSerializer):
+    # TimeWindowPartitionsSubsets have custom logic to delay calculating num_partitions until it
+    # is needed to improve performance. When serializing, we want to serialize the number of
+    # partitions, so we force calculatation.
+    def before_pack(self, value: "TimeWindowPartitionsSubset") -> "TimeWindowPartitionsSubset":
+        if value._asdict()["num_partitions"] is None:
+            return TimeWindowPartitionsSubset(
+                partitions_def=value.partitions_def,
+                num_partitions=value.num_partitions,
+                included_time_windows=value.included_time_windows,
+            )
+        return value
+
+
 @whitelist_for_serdes(
-    field_serializers={"partitions_def": TimeWindowPartitionsDefinitionSerializer}
+    field_serializers={"partitions_def": TimeWindowPartitionsDefinitionSerializer},
+    serializer=TimeWindowPartitionsSubsetSerializer,
 )
 class TimeWindowPartitionsSubset(
+    BaseTimeWindowPartitionsSubset,
     NamedTuple(
         "_TimeWindowPartitionsSubset",
         [
@@ -1883,7 +1904,6 @@ class TimeWindowPartitionsSubset(
             ("included_time_windows", Sequence[TimeWindow]),
         ],
     ),
-    BaseTimeWindowPartitionsSubset,
 ):
     def __new__(
         cls,
